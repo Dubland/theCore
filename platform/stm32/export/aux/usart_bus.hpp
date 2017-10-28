@@ -355,7 +355,7 @@ template<usart_device dev>
 void usart_bus<dev>::set_tx(size_t size, uint8_t fill_byte)
 {
     // TODO: implement
-    ecl_assert_msg(0, "Not implemeted!");
+    ecl_assert_msg(0, "Not implemented!");
 
     (void) size;
     (void) fill_byte;
@@ -406,7 +406,7 @@ ecl::err usart_bus<dev>::do_xfer()
 {
     do_tx();
     do_rx();
-    
+
     return ecl::err::ok;
 }
 

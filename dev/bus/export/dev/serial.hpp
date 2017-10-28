@@ -25,7 +25,6 @@ template<class PBus, size_t buf_size = 128>
 class serial
 {
 public:
-
     static constexpr auto buffer_size = buf_size;
     using platform_handle = PBus;
 
@@ -98,12 +97,95 @@ private:
     static void bus_handler(bus_channel ch, bus_event type, size_t total);
 
     static bool m_is_inited;
+#if 0
     static std::atomic_bool m_new_xfer_allowed;
+#endif
 
+// ---------------
+
+    struct chunk
+    {
+        static constexpr auto xfer_size = buffer_size / 2;
+        static constexpr auto size() { return xfer_size; }
+        using bsem = safe_storage<binary_semaphore>;
+        using std::atomic_size_t;
+
+        uint8_t         data[xfer_size];
+        atomic_size_t   start; // Write by user, read by xfer and user
+        atomic_size_t   end; // Write by xfer, read by xfer and user
+        bool            xfer_pend   = false;
+        bsem            data_flag;
+
+        chunk() { data_flag.init(); }
+
+        // Called by user when buffer is finally depleted.
+        void restore() { start = end = 0; }
+        // Called by xfer, if next buffer still read by the user.
+        void set_pend() { xfer_pend = true; }
+        // Called by user after moving to the next buffer.
+        bool pend() { return xfer_pend; }
+
+        // Called by user or xfer, when new xfer should be started
+        // Pre: previous xfer must be completed
+        ecl::err start_xfer()
+        {
+            PBus::set_rx(data, size());
+            auto rc = PBus::do_rx();
+            if (is_ok(rc)) {
+                xfer_pend = false;
+            }
+
+            return rc;
+        }
+
+        // Called by user to check how much data is there
+        size_t fill() { ecl_assert(end >= start); return end - start; }
+        // Called by user and xfer, to check if there are new data to read.
+        bool no_data() { return !fill(); }
+        bool depleted() { return start == size(); }
+        bool no_space() { return end == size(); }
+
+        bool wait_data() { data_flag.get().wait(); return true; } // TODO
+        void signal_data() { data_flag.get().signal(); }
+
+        void new_bytes(size_t cnt) { end += cnt; ecl_assert(end <= size()); }
+
+        size_t copy(uint8_t *dst, size_t sz)
+        {
+            auto to_copy = std::min(sz, fill());
+            ecl_assert(to_copy); // There must be some data.
+
+            std::copy(dst, dst + to_copy, data + start);
+            start += to_copy;
+            ecl_assert(start <= end);
+            return to_copy;
+        }
+
+    };
+
+    struct serial_chunks
+    {
+        chunk chunks[2] = {};
+        int user_idx = 0;
+        int xfer_idx = 0;
+
+        chunk &user() { return chunks[user_idx]; }
+        chunk &xfer() { return chunks[xfer_idx]; }
+
+        chunk &user_next() { user_idx ^= 1; return user(); }
+        chunk &xfer_next() { xfer_idx ^= 1; return xfer(); }
+    };
+
+    static safe_storage<serial_chunks> m_chunks;
+
+// ---------------
+
+#if 0
     static uint8_t m_rx_buffer[buf_size];
     static std::atomic_size_t m_rx_write_iter; //!< Used for accepting data from the bus
     static std::atomic_size_t m_rx_read_iter; //!< Used for returning data to the user
     static safe_storage<binary_semaphore> m_rx_is_data_available; //!< Signals if rx buffer is available for reading
+#endif
 
     static uint8_t m_tx_buffer[buf_size];
     static std::atomic_size_t m_tx_write_iter; //!< Used for accepting data from the user
@@ -114,6 +196,7 @@ private:
 template <class PBus, size_t buf_size>
 bool serial<PBus, buf_size>::m_is_inited;
 
+#if 0
 template <class PBus, size_t buf_size>
 std::atomic_bool serial<PBus, buf_size>::m_new_xfer_allowed;
 
@@ -128,6 +211,7 @@ std::atomic_size_t serial<PBus, buf_size>::m_rx_read_iter;
 
 template <class PBus, size_t buf_size>
 safe_storage<binary_semaphore> serial<PBus, buf_size>::m_rx_is_data_available;
+#endif
 
 template <class PBus, size_t buf_size>
 uint8_t serial<PBus, buf_size>::m_tx_buffer[buf_size];
@@ -142,11 +226,15 @@ template <class PBus, size_t buf_size>
 safe_storage<binary_semaphore> serial<PBus, buf_size>::m_tx_is_buffer_available;
 
 template <class PBus, size_t buf_size>
+safe_storage<typename serial<PBus, buf_size>::serial_chunks> serial<PBus, buf_size>::m_chunks;
+
+template <class PBus, size_t buf_size>
 err serial<PBus, buf_size>::init()
 {
+    m_chunks.init();
     ecl_assert(!m_is_inited);
-    m_tx_is_buffer_available.init();
-    m_rx_is_data_available.init();
+    // m_tx_is_buffer_available.init();
+    // m_rx_is_data_available.init();
     auto result = PBus::init();
     if (is_error(result)) {
         return result;
@@ -156,11 +244,11 @@ err serial<PBus, buf_size>::init()
     if (is_error(result)) {
         return result;
     }
-    m_new_xfer_allowed = true;
-    PBus::set_rx(m_rx_buffer, buffer_size);
+    // m_new_xfer_allowed = true;
+    // PBus::set_rx(m_rx_buffer, buffer_size);
     PBus::set_tx(m_tx_buffer, buffer_size);
     m_tx_is_buffer_available.get().signal();
-    result = PBus::do_rx();
+    result = m_chunks.get().xfer().start_xfer();
     if (is_ok(result)) {
         m_is_inited = true;
     }
@@ -173,12 +261,12 @@ err serial<PBus, buf_size>::deinit()
     ecl_assert(m_is_inited);
     PBus::cancel_xfer();
     PBus::reset_buffers();
-    m_rx_read_iter = 0;
-    m_rx_write_iter = 0;
+    // m_rx_read_iter = 0;
+    // m_rx_write_iter = 0;
     m_tx_read_iter = 0;
     m_tx_write_iter = 0;
     m_is_inited = false;
-    m_rx_is_data_available.deinit();
+    // m_rx_is_data_available.deinit();
     m_tx_is_buffer_available.deinit();
     return err::ok;
 }
@@ -187,6 +275,9 @@ template <class PBus, size_t buf_size>
 void serial<PBus, buf_size>::bus_handler(bus_channel ch, bus_event type, size_t total)
 {
     if (ch == bus_channel::rx) {
+
+
+#if 0
         ecl_assert(type == bus_event::tc && m_rx_write_iter + 1 == total);
 
         // It is possible that the buffer was empty before the current byte arrived
@@ -219,6 +310,7 @@ void serial<PBus, buf_size>::bus_handler(bus_channel ch, bus_event type, size_t 
                 PBus::do_rx();
             }
         }
+        #endif
     } else if (ch == bus_channel::tx) {
         ecl_assert(type == bus_event::tc && buffer_size == total);
 
@@ -240,6 +332,29 @@ err serial<PBus, buf_size>::recv_buf(uint8_t *buf, size_t &sz)
     ecl_assert(m_is_inited);
     err result = err::ok;
 
+    auto &user_buf = m_chunks.get().user();
+
+    if (user_buf.no_data()) { // TODO: reading xfer-owned variable
+        user_buf.wait_data(); // All ok: semaphore
+    }
+
+    // Data is there, process...
+    size_t read = user_buf.copy(buf, sz); // TODO: reading xfer-owned variable
+    sz = read;
+
+    // No data inside buffer.
+    if (user_buf.depleted()) { // All ok: user-owned variable
+        user_buf.restore();
+
+        m_chunks.get().user_next();
+        // Start xfer on buffer that was previously occupied by user.
+        if (user_buf.pend()) { // TODO: reading xfer-owned variable
+            user_buf.start_xfer();
+        }
+    }
+
+
+#if 0
     // Disallow starting new xfer from bus_handler()
     m_new_xfer_allowed = false;
 
@@ -278,6 +393,8 @@ err serial<PBus, buf_size>::recv_buf(uint8_t *buf, size_t &sz)
 
     // Allow starting new xfer from bus_handler()
     m_new_xfer_allowed = true;
+
+#endif
     return result;
 }
 
