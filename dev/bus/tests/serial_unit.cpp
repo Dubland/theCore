@@ -1,3 +1,4 @@
+#include <iostream>
 #include "dev/serial.hpp"
 
 #include <CppUTest/TestHarness.h>
@@ -8,6 +9,7 @@
 #include "ecl/thread/semaphore.hpp"
 
 #include <thread>
+#include <numeric>
 
 using serial_t = ecl::serial<platform_mock>;
 
@@ -17,7 +19,7 @@ TEST_GROUP(serial)
     {
         mock().disable();
         serial_t::init();
-        CHECK_EQUAL(serial_t::buffer_size, platform_mock::m_rx_size);
+        CHECK_EQUAL(serial_t::buffer_size / 2, platform_mock::m_rx_size);
         // TODO: add check for tx when send_* functions
         // will be implemented for serial class.
         mock().enable();
@@ -25,6 +27,7 @@ TEST_GROUP(serial)
 
     void teardown()
     {
+        platform_mock::m_ignore_buffer_setters = false;
         mock().disable();
         serial_t::deinit();
         mock().enable();
@@ -62,27 +65,56 @@ TEST(serial, recv_byte_block_unblock)
 TEST(serial, multiple_recv_no_block)
 {
     // Fill internal rx buffer and read less bytes in multiple calls
+
     mock("platform_bus")
         .expectOneCall("do_rx")
         .andReturnValue(static_cast<int>(ecl::err::ok));
-    for (size_t i = 0; i < serial_t::buffer_size; i++) {
-        platform_mock::m_rx[i] = static_cast<uint8_t>(i);
-        platform_mock::invoke(ecl::bus_channel::rx, ecl::bus_event::tc, i+1);
+
+    // Ignore set_rx.
+    mock("platform_bus").ignoreOtherCalls();
+
+    // Exploiting the fact that serial operates over double buffer and will
+    // not switch to the next buffer until it will be fully filled.
+    uint8_t rx_buf[serial_t::buffer_size / 2];
+
+    // Prepare buffer.
+    for (size_t i = 0; i < sizeof(rx_buf); i++) {
+        rx_buf[i] = static_cast<uint8_t>(i);
+    }
+
+    // Safely copy buffer
+    platform_mock::copy_to_rx(rx_buf, sizeof(rx_buf));
+
+    for (size_t i = 0; i < sizeof(rx_buf); i++) {
+        platform_mock::invoke(ecl::bus_channel::rx, ecl::bus_event::tc, i + 1);
     }
 
     auto expected_ret = ecl::err::ok;
     uint8_t buf[32];
-    size_t buf_size = sizeof(buf);
+    size_t total_actual_read = 0;
+    size_t total_counted_read = 0;
+    //size_t remain_read = sizeof(rx_buf);
+    size_t last = 0;
 
-    for (size_t i = 0; i < serial_t::buffer_size/buf_size; i++) {
-        auto actual_ret = serial_t::recv_buf(buf, buf_size);
+    while (total_counted_read < sizeof(rx_buf)) {
+        size_t ret_sz = sizeof(buf);
+        auto actual_ret = serial_t::recv_buf(buf, ret_sz);
         CHECK_EQUAL(expected_ret, actual_ret);
-        CHECK_EQUAL(sizeof(buf), buf_size);
-        for (size_t j = 0; j < buf_size; j++) {
+        CHECK(ret_sz <= sizeof(buf));
+
+        for (size_t j = 0; j < ret_sz; j++) {
             // Verify that the retrieved data is correct
-            CHECK_EQUAL(static_cast<uint8_t>(i*buf_size + j), buf[j]);
+            CHECK_EQUAL(static_cast<uint8_t>(last + j), buf[j]);
         }
+
+        last += ret_sz;
+
+        total_counted_read += sizeof(buf);
+        total_actual_read += ret_sz;
     }
+
+    CHECK_EQUAL(sizeof(rx_buf), total_actual_read);
+
 
     mock().checkExpectations();
 }
@@ -93,6 +125,9 @@ TEST(serial, multiple_recv_block_and_unblock)
     mock("platform_bus")
         .expectOneCall("do_rx")
         .andReturnValue(static_cast<int>(ecl::err::ok));
+    // Ignore set_rx.
+    mock("platform_bus").ignoreOtherCalls();
+
     for (size_t i = 0; i < serial_t::buffer_size; i++) {
         platform_mock::m_rx[i] = static_cast<uint8_t>(i);
         platform_mock::invoke(ecl::bus_channel::rx, ecl::bus_event::tc, i+1);
@@ -275,28 +310,39 @@ TEST(serial, send_by_parts)
 
 TEST(serial, send_recv_mixed)
 {
-    uint8_t buffer[serial_t::buffer_size];
-    size_t buffer_size = sizeof(buffer);
+    uint8_t buffer_rx[serial_t::buffer_size / 2];
+    uint8_t buffer_tx[serial_t::buffer_size];
+    size_t buffer_size_rx = sizeof(buffer_rx);
+    size_t buffer_size_tx = sizeof(buffer_tx);
+
+    // Ignore RX
+    platform_mock::m_ignore_buffer_setters = true;
 
     mock("platform_bus")
         .expectOneCall("do_rx")
         .andReturnValue(static_cast<int>(ecl::err::ok));
-    for (size_t i = 0; i < buffer_size; i++) {
-        platform_mock::m_rx[i] = static_cast<uint8_t>(i);
+
+    std::iota(buffer_rx, buffer_rx + buffer_size_rx, 0);
+    std::iota(buffer_tx, buffer_tx + buffer_size_tx, 0);
+
+    platform_mock::copy_to_rx(buffer_rx, buffer_size_rx);
+
+    for (size_t i = 0; i < buffer_size_rx; i++) {
         platform_mock::invoke(ecl::bus_channel::rx, ecl::bus_event::tc, i+1);
     }
 
-    auto ret = serial_t::recv_buf(buffer, buffer_size);
+    auto ret = serial_t::recv_buf(buffer_rx, buffer_size_rx);
     CHECK_EQUAL(ecl::err::ok, ret);
 
     mock("platform_bus")
         .expectOneCall("do_tx")
         .andReturnValue(static_cast<int>(ecl::err::ok));
-    ret = serial_t::send_buf(buffer, buffer_size);
+
+    ret = serial_t::send_buf(buffer_tx, buffer_size_tx);
     CHECK_EQUAL(ecl::err::ok, ret);
-    CHECK_EQUAL(buffer_size, sizeof(buffer));
-    for (size_t i = 0; i < buffer_size; i++) {
-        CHECK_EQUAL(static_cast<uint8_t>(i), buffer[i]);
+    CHECK_EQUAL(buffer_size_tx, sizeof(buffer_tx));
+    for (size_t i = 0; i < buffer_size_tx; i++) {
+        CHECK_EQUAL(static_cast<uint8_t>(i), platform_mock::m_tx[i]);
     }
 
     mock().checkExpectations();
