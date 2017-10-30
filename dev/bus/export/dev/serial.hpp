@@ -97,9 +97,7 @@ private:
     static void bus_handler(bus_channel ch, bus_event type, size_t total);
 
     static bool m_is_inited;
-#if 0
-    static std::atomic_bool m_new_xfer_allowed;
-#endif
+
 
 // ---------------
 
@@ -112,12 +110,12 @@ private:
         static constexpr auto size() { return xfer_size; }
 
         uint8_t   data[xfer_size];
-        asize_t   start; // Write by user, read by xfer and user
-        asize_t   end; // Write by xfer, read by xfer and user
-        bool      xfer_pend   = false;
-        bsem      data_flag;
+        asize_t   start {0}; // Write by user, read by xfer and user
+        asize_t   end {0}; // Write by xfer, read by xfer and user
+        bool      xfer_pend = false;
+        bsem      data_flag = {};
 
-        chunk() { data_flag.init(); start.store(0); end.store(0); }
+        chunk() { data_flag.init(); }
 
         // Called by user when buffer is finally depleted.
         void restore() { start = end = 0; }
@@ -133,11 +131,20 @@ private:
         ecl::err start_xfer()
         {
             PBus::set_rx(data, size());
-            auto rc = PBus::do_rx();
-            if (is_ok(rc)) {
-                xfer_pend = false;
+
+            auto rc = PBus::enable_listen_mode();
+            if (is_error(rc)) {
+                PBus::set_rx(nullptr, 0);
+                return rc;
+            }
+            
+            rc = PBus::do_rx();
+            if (is_error(rc)) {
+                PBus::set_rx(nullptr, 0);
+                return rc;                
             }
 
+            xfer_pend = false;
             return rc;
         }
 
@@ -215,17 +222,13 @@ err serial<PBus, buf_size>::init()
 {
     m_chunks.init();
     ecl_assert(!m_is_inited);
-    // m_tx_is_buffer_available.init();
-    // m_rx_is_data_available.init();
+
     auto result = PBus::init();
     if (is_error(result)) {
         return result;
     }
     PBus::set_handler(bus_handler);
-    result = PBus::enable_listen_mode();
-    if (is_error(result)) {
-        return result;
-    }
+
     // m_new_xfer_allowed = true;
     // PBus::set_rx(m_rx_buffer, buffer_size);
     PBus::set_tx(m_tx_buffer, buffer_size);

@@ -407,6 +407,11 @@ ecl::err usart_bus<dev>::do_xfer()
     do_tx();
     do_rx();
 
+    // Do unmasking afterwards, to make sure TX/RX flags are set properly,
+    // and ISR will treat them right.
+    auto irqn = pick_irqn();
+    irq::unmask(irqn);
+    
     return ecl::err::ok;
 }
 
@@ -415,13 +420,14 @@ ecl::err usart_bus<dev>::do_rx()
 {
     ecl_assert(inited());
 
-    auto irqn = pick_irqn();
     auto usart = pick_usart();
 
     if (!m_rx) {
         set_rx_done();
         return ecl::err::ok;
     }
+
+    m_rx_left = m_rx_size;
 
     clear_rx_done();
 
@@ -431,8 +437,6 @@ ecl::err usart_bus<dev>::do_rx()
     // In case if previous xfer was canceled.
     clear_rx_canceled();
 
-    irq::unmask(irqn);
-
     return ecl::err::ok;
 }
 
@@ -441,7 +445,6 @@ ecl::err usart_bus<dev>::do_tx()
 {
     ecl_assert(inited());
 
-    auto irqn = pick_irqn();
     auto usart = pick_usart();
 
     if (!m_tx) {
@@ -449,6 +452,8 @@ ecl::err usart_bus<dev>::do_tx()
         return ecl::err::ok;
     }
 
+    m_tx_left = m_tx_size;
+    
     clear_tx_done();
 
     // Bytes will be send in IRQ handler.
@@ -456,8 +461,6 @@ ecl::err usart_bus<dev>::do_tx()
 
     // In case if previous xfer was canceled.
     clear_tx_canceled();
-
-    irq::unmask(irqn);
 
     return ecl::err::ok;
 }
