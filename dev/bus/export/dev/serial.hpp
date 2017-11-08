@@ -137,11 +137,11 @@ private:
                 PBus::set_rx(nullptr, 0);
                 return rc;
             }
-            
+
             rc = PBus::do_rx();
             if (is_error(rc)) {
                 PBus::set_rx(nullptr, 0);
-                return rc;                
+                return rc;
             }
 
             xfer_pend = false;
@@ -189,33 +189,21 @@ private:
     };
 
     static safe_storage<serial_chunks> m_chunks;
-
-// ---------------
-
-
-    static uint8_t m_tx_buffer[buf_size];
-    static std::atomic_size_t m_tx_write_iter; //!< Used for accepting data from the user
-    static std::atomic_size_t m_tx_read_iter; //!< Used for writing data on the bus
-    static safe_storage<binary_semaphore> m_tx_is_buffer_available; //!< Signals if tx buffer has at least one available byte
+    static safe_storage<binary_semaphore> m_tx_rdy; //!< Signalled if tx channel is ready
+    static uint8_t m_tx_buf[buf_size];
 };
 
 template <class PBus, size_t buf_size>
 bool serial<PBus, buf_size>::m_is_inited;
 
 template <class PBus, size_t buf_size>
-uint8_t serial<PBus, buf_size>::m_tx_buffer[buf_size];
-
-template <class PBus, size_t buf_size>
-std::atomic_size_t serial<PBus, buf_size>::m_tx_write_iter;
-
-template <class PBus, size_t buf_size>
-std::atomic_size_t serial<PBus, buf_size>::m_tx_read_iter;
-
-template <class PBus, size_t buf_size>
-safe_storage<binary_semaphore> serial<PBus, buf_size>::m_tx_is_buffer_available;
-
-template <class PBus, size_t buf_size>
 safe_storage<typename serial<PBus, buf_size>::serial_chunks> serial<PBus, buf_size>::m_chunks;
+
+template <class PBus, size_t buf_size>
+safe_storage<binary_semaphore> serial<PBus, buf_size>::m_tx_rdy;
+
+template <class PBus, size_t buf_size>
+uint8_t serial<PBus, buf_size>::m_tx_buf[buf_size];
 
 template <class PBus, size_t buf_size>
 err serial<PBus, buf_size>::init()
@@ -228,11 +216,9 @@ err serial<PBus, buf_size>::init()
         return result;
     }
     PBus::set_handler(bus_handler);
+    PBus::set_tx(m_tx_buf, buffer_size);
 
-    // m_new_xfer_allowed = true;
-    // PBus::set_rx(m_rx_buffer, buffer_size);
-    PBus::set_tx(m_tx_buffer, buffer_size);
-    m_tx_is_buffer_available.get().signal();
+    m_tx_rdy.get().signal();
     result = m_chunks.get().xfer().start_xfer();
     if (is_ok(result)) {
         m_is_inited = true;
@@ -246,13 +232,8 @@ err serial<PBus, buf_size>::deinit()
     ecl_assert(m_is_inited);
     PBus::cancel_xfer();
     PBus::reset_buffers();
-    // m_rx_read_iter = 0;
-    // m_rx_write_iter = 0;
-    m_tx_read_iter = 0;
-    m_tx_write_iter = 0;
     m_is_inited = false;
-    // m_rx_is_data_available.deinit();
-    m_tx_is_buffer_available.deinit();
+    m_tx_rdy.deinit();
     return err::ok;
 }
 
@@ -260,30 +241,32 @@ template <class PBus, size_t buf_size>
 void serial<PBus, buf_size>::bus_handler(bus_channel ch, bus_event type, size_t total)
 {
     if (ch == bus_channel::rx) {
-        auto &xfer_buf = m_chunks.get().xfer();
+        if (type == bus_event::tc) {
+            auto &xfer_buf = m_chunks.get().xfer();
 
-        // TODO: correct assert to pass error case and inform it to user..
-        ecl_assert(type == bus_event::tc && xfer_buf.end + 1 == total);
+            // TODO: correct assert to consume more than 1 byte at time.
+            ecl_assert(xfer_buf.end + 1 == total);
 
-        if (xfer_buf.no_data()) {
-            xfer_buf.signal_data();
-        }
+            if (xfer_buf.no_data()) {
+                xfer_buf.signal_data();
+            }
 
-        xfer_buf.new_bytes(1);
+            xfer_buf.new_bytes(1);
 
-        if (xfer_buf.no_space()) {
-            auto &new_xfer_buf = m_chunks.get().xfer_next();
-            if (new_xfer_buf.fresh()) {
-                new_xfer_buf.start_xfer();
-            } else {
-                new_xfer_buf.set_pend();
+            if (xfer_buf.no_space()) {
+                auto &new_xfer_buf = m_chunks.get().xfer_next();
+                if (new_xfer_buf.fresh()) {
+                    new_xfer_buf.start_xfer();
+                } else {
+                    new_xfer_buf.set_pend();
+                }
             }
         }
     } else if (ch == bus_channel::tx) {
-        ecl_assert(type == bus_event::tc && buffer_size == total);
-
-        m_tx_read_iter = 0;
-        m_tx_is_buffer_available.get().signal();
+        if (type == bus_event::tc) {
+            m_tx_rdy.get().signal();
+        } // else error - ignore. TC event _must_ be supplied
+          // after possible error.
     }
 }
 
@@ -334,42 +317,25 @@ err serial<PBus, buf_size>::send_byte(uint8_t byte)
 template <class PBus, size_t buf_size>
 err serial<PBus, buf_size>::send_buf(const uint8_t *buf, size_t &size)
 {
-    static_cast<void>(buf);
-    static_cast<void>(size);
+    // Wait until TX will be ready
+    m_tx_rdy.get().wait();
 
-    err ret = err::ok;
+    auto to_copy = std::min(size, buf_size);
+    std::copy(buf, buf + to_copy, m_tx_buf);
+    auto rc = PBus::do_tx();
 
-    // Wait until at least one byte of free space becomes available
-    m_tx_is_buffer_available.get().wait();
-
-    // Save atomic variables on stack
-    size_t read_pos = m_tx_read_iter;
-    size_t write_pos = m_tx_write_iter;
-
-    size_t new_size = std::min(size, write_pos < read_pos ?
-            read_pos - write_pos : buffer_size - write_pos);
-    std::copy(buf, buf + size, m_tx_buffer + write_pos);
-
-    if (new_size < size) {
-        ret = err::again;
+    if (is_error(rc)) {
+        return rc;
     }
 
-    size = new_size;
-
-    m_tx_write_iter += new_size;
-
-    // Signal buffer_available semaphore if buffer is not full
-    if (m_tx_read_iter != m_tx_write_iter) {
-        m_tx_is_buffer_available.get().signal();
+    // Only part of the buffer was consumed
+    if (to_copy < size) {
+        rc = err::again;
     }
 
-    auto tmp = buffer_size;
-    // We issue new tx transfer only when the tx_buffer is full
-    if (m_tx_write_iter.compare_exchange_weak(tmp, 0)) {
-        PBus::do_tx();
-    }
+    size = to_copy;
 
-    return ret;
+    return rc;
 }
 
 } // namespace ecl
