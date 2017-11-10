@@ -43,23 +43,33 @@ public:
     //! \return Operation status.
     static err deinit();
 
+    //! Sets or clears non-block mode of operation.
+    //! \pre Driver is initialized.
+    //! \details Setting nonblock mode will prevent recv and send functions
+    //! from blocking. Special error code will be returned to notify user about
+    //! possible blocking.
+    //! \param[in] state 'true' to enable non-blocking mode.
+    //! \retval err::ok If state set without error.
+    static err nonblock(bool state = true);
+
     //! Obtains a byte from serial device.
     //! \pre Driver is initialized.
-    //! \details Call will block if there is no data to return.
+    //! \details If there is no data to return call with block in blocking mode,
+    //! and return immediately in non-blocking mode.
     //! Otherwise data will be stored in the given argument and
     //! method will return.
     //! \param[out] byte Place for incoming byte. Will remain
     //!                  unchanged if error occurs.
     //! \return Operation status.
-    //! \retval err::nobufs Some data will be lost after the call completes.
-    //!
+    //! \retval err::wouldblock Non-blocking mode is set and read would block
+    //!                         otherwise.
     static err recv_byte(uint8_t &byte);
 
     //! Gets buffer from serial device.
     //! \pre Driver is initialized.
-    //! \details Call will block if there is no data to return.
-    //! Otherwise, buffer will be populated with avaliable data
-    //! and method will return.
+    //! \details Call will block if there is no data to return in blocking mode.
+    //! In non-blocking mode special code is returned. Otherwise, buffer will be
+    //! populated with avaliable data and method will return.
     //! \param[out]     buf Buffer to fill with data.
     //! \param[in,out]  sz  Size of buffer. Will be updated with
     //!                     amount of bytes written to the buffer.
@@ -67,23 +77,28 @@ public:
     //!                     with bytes successfully stored in the buffer
     //!                     before error occurred.
     //! \return Operation status.
-    //! \retval err::nobufs Some data will be lost after the call completes.
+    //! \retval err::wouldblock Non-blocking mode is set and read would block
+    //!                         otherwise.
     static err recv_buf(uint8_t *buf, size_t &sz);
 
     //! Sends byte to a serial device.
     //! \pre Driver is initialized.
     //! \details It may not block if internal buffering is applied.
     //! It may also block if platform device is not yet ready to
-    //! send data.
+    //! send data. In non-blocking mode special code is returned instead of 
+    //! blocking.
     //! \param[in] byte Byte to send.
     //! \return Operation status.
+    //! \retval err::wouldblock Non-blocking mode is set and send would block
+    //!                         otherwise.
     static err send_byte(uint8_t byte);
 
     //! Sends buffer to a serial stream.
     //! \pre Driver is initialized.
     //! \details It may not block if internal buffering is applied.
     //! It may also block if platform device is not yet ready to
-    //! send data.
+    //! send data. In non-blocking mode special code is returned instead of 
+    //! blocking.
     //! \param[in]      buf Buffer to send.
     //! \param[in,out]  sz  Size of buffer. Will be updated with
     //!                     amount of bytes sent In case of error,
@@ -91,12 +106,15 @@ public:
     //!                     successfully sent before error occur.
     //! \return Operation status.
     //! \retval err:again The buffer was not consumed entirely.
+    //! \retval err::wouldblock Non-blocking mode is set and send would block
+    //!                         otherwise.
     static err send_buf(const uint8_t *buf, size_t &sz);
 
 private:
     static void bus_handler(bus_channel ch, bus_event type, size_t total);
 
     static bool m_is_inited;
+    static bool m_nonblock;
 
 
 // ---------------
@@ -197,6 +215,9 @@ template <class PBus, size_t buf_size>
 bool serial<PBus, buf_size>::m_is_inited;
 
 template <class PBus, size_t buf_size>
+bool serial<PBus, buf_size>::m_nonblock;
+
+template <class PBus, size_t buf_size>
 safe_storage<typename serial<PBus, buf_size>::serial_chunks> serial<PBus, buf_size>::m_chunks;
 
 template <class PBus, size_t buf_size>
@@ -270,6 +291,13 @@ void serial<PBus, buf_size>::bus_handler(bus_channel ch, bus_event type, size_t 
 }
 
 template <class PBus, size_t buf_size>
+err serial<PBus, buf_size>::nonblock(bool state)
+{
+    m_nonblock = state;
+    return err::ok;
+}
+
+template <class PBus, size_t buf_size>
 err serial<PBus, buf_size>::recv_byte(uint8_t &byte)
 {
     size_t sz = 1;
@@ -283,6 +311,11 @@ err serial<PBus, buf_size>::recv_buf(uint8_t *buf, size_t &sz)
     err result = err::ok;
 
     auto &user_buf = m_chunks.get().user();
+
+    if (m_nonblock && user_buf.no_data()) { // TODO: reading xfer-owned variable
+        sz = 0;
+        return err::wouldblock;
+    }
 
     while (user_buf.no_data()) { // TODO: reading xfer-owned variable
         user_buf.wait_data(); // All ok: semaphore
@@ -317,7 +350,14 @@ template <class PBus, size_t buf_size>
 err serial<PBus, buf_size>::send_buf(const uint8_t *buf, size_t &size)
 {
     // Wait until TX will be ready
-    m_tx_rdy.get().wait();
+    if (m_nonblock) {
+        if (!m_tx_rdy.get().try_wait()) {
+            size = 0;
+            return err::wouldblock;
+        }
+    } else {
+        m_tx_rdy.get().wait();
+    }
 
     auto to_copy = std::min(size, buf_size);
     std::copy(buf, buf + to_copy, m_tx_buf);
