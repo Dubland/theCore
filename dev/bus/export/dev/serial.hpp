@@ -216,7 +216,6 @@ err serial<PBus, buf_size>::init()
         return result;
     }
     PBus::set_handler(bus_handler);
-    PBus::set_tx(m_tx_buf, buffer_size);
 
     m_tx_rdy.get().signal();
     result = m_chunks.get().xfer().start_xfer();
@@ -322,6 +321,7 @@ err serial<PBus, buf_size>::send_buf(const uint8_t *buf, size_t &size)
 
     auto to_copy = std::min(size, buf_size);
     std::copy(buf, buf + to_copy, m_tx_buf);
+    PBus::set_tx(m_tx_buf, to_copy);
     auto rc = PBus::do_tx();
 
     if (is_error(rc)) {

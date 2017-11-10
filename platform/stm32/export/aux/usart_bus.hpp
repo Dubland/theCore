@@ -334,11 +334,13 @@ ecl::err usart_bus<dev>::init()
     };
 
     irq::subscribe(irqn, lambda);
+    irq::unmask(irqn);
+
+    set_inited();
 
     // Enable UART
     USART_Cmd(usart, ENABLE);
 
-    set_inited();
     return ecl::err::ok;
 }
 
@@ -404,13 +406,9 @@ void usart_bus<dev>::reset_handler()
 template<usart_device dev>
 ecl::err usart_bus<dev>::do_xfer()
 {
-    do_tx();
+    // Order matters
     do_rx();
-
-    // Do unmasking afterwards, to make sure TX/RX flags are set properly,
-    // and ISR will treat them right.
-    auto irqn = pick_irqn();
-    irq::unmask(irqn);
+    do_tx();
     
     return ecl::err::ok;
 }
@@ -431,11 +429,11 @@ ecl::err usart_bus<dev>::do_rx()
 
     clear_rx_done();
 
-    // Bytes will be send in IRQ handler.
-    USART_ITConfig(usart, USART_IT_RXNE, ENABLE);
-
     // In case if previous xfer was canceled.
     clear_rx_canceled();
+
+    // Bytes will be send in IRQ handler.
+    USART_ITConfig(usart, USART_IT_RXNE, ENABLE);
 
     return ecl::err::ok;
 }
@@ -446,6 +444,7 @@ ecl::err usart_bus<dev>::do_tx()
     ecl_assert(inited());
 
     auto usart = pick_usart();
+    //auto irqn  = pick_irqn();
 
     if (!m_tx) {
         set_tx_done();
@@ -456,11 +455,13 @@ ecl::err usart_bus<dev>::do_tx()
     
     clear_tx_done();
 
+    // In case if previous xfer was canceled.
+    clear_tx_canceled();
+
     // Bytes will be send in IRQ handler.
     USART_ITConfig(usart, USART_IT_TXE, ENABLE);
 
-    // In case if previous xfer was canceled.
-    clear_tx_canceled();
+    //irq::unmask(irqn);
 
     return ecl::err::ok;
 }
@@ -484,7 +485,7 @@ ecl::err usart_bus<dev>::cancel_rx()
 
     USART_ITConfig(usart, USART_IT_RXNE, DISABLE);
 
-    irq::mask(irqn);
+    //irq::mask(irqn);
     irq::clear(irqn);
 
     set_rx_done();
@@ -503,7 +504,7 @@ ecl::err usart_bus<dev>::cancel_tx()
 
     USART_ITConfig(usart, USART_IT_TXE, DISABLE);
 
-    irq::mask(irqn);
+    //irq::mask(irqn);
     irq::clear(irqn);
 
     set_tx_done();
@@ -687,14 +688,15 @@ void usart_bus<dev>::irq_handler()
     }
 
     if (tx_done() && rx_done()) {
+        // TODO: clear 'done' flags here too instead doing it in do_rx()/do_tx() ?
         if (!tx_canceled() && !rx_canceled()) {
             // Both TX and RX are finished. Notifying.
             event_handler()(channel::meta, event::tc, 0);
         }
-    } else {
-        // Not yet finished - keep interrupts on.
-        irq::unmask(irqn);
-    }
+    } 
+
+    // Keep interrupts always on
+    irq::unmask(irqn);
 }
 
 } // namespace ecl
