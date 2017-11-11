@@ -85,7 +85,7 @@ public:
     //! \pre Driver is initialized.
     //! \details It may not block if internal buffering is applied.
     //! It may also block if platform device is not yet ready to
-    //! send data. In non-blocking mode special code is returned instead of 
+    //! send data. In non-blocking mode special code is returned instead of
     //! blocking.
     //! \param[in] byte Byte to send.
     //! \return Operation status.
@@ -97,7 +97,7 @@ public:
     //! \pre Driver is initialized.
     //! \details It may not block if internal buffering is applied.
     //! It may also block if platform device is not yet ready to
-    //! send data. In non-blocking mode special code is returned instead of 
+    //! send data. In non-blocking mode special code is returned instead of
     //! blocking.
     //! \param[in]      buf Buffer to send.
     //! \param[in,out]  sz  Size of buffer. Will be updated with
@@ -111,26 +111,49 @@ public:
     static err send_buf(const uint8_t *buf, size_t &sz);
 
 private:
+    //! Bus event handler
     static void bus_handler(bus_channel ch, bus_event type, size_t total);
 
+    //! Set if serial is initialized.
     static bool m_is_inited;
+
+    //! Set if serial is in non-blocking mode.
     static bool m_nonblock;
 
-
-// ---------------
-
+    //! Helper struct, represents xfer chunk (part of the buffer) for RX
+    //! communications.
+    //! \details When accessing buffers and metadata, it is convinient to
+    //! think about two contexes - user (performed in regular thread) and
+    //! xfer (performed in the bus_handler(), interrupt).
+    //! We are pretty safe if both contexes does not write into the same object..
     struct chunk
     {
+        // Convenient aliases.
         using bsem = safe_storage<binary_semaphore>;
         using asize_t = std::atomic_size_t;
 
+        //! Buffer size. Each chunk is a half of a requested buffer size.
         static constexpr auto xfer_size = buffer_size / 2;
+        //! Helper function to return size.
         static constexpr auto size() { return xfer_size; }
 
+        //! Buffer itself. Written by platform (xfer context). Read by user.
         uint8_t   data[xfer_size];
-        asize_t   start {0}; // Write by user, read by xfer and user
-        asize_t   end {0}; // Write by xfer, read by xfer and user
+
+        //! Start marker, written from user context, read by xfer and user contexes.
+        //! Changes when user reads data from the buffer.
+        asize_t   start {0};
+
+        //! End marker, written by xfer, read by xfer and user contexes.
+        //! Changes when xfer writes data to the buffer.
+        asize_t   end {0};
+
+        //! Pending xfer flag. Set when xfer is failed to start
+        //! because there is still some data. User _must_ read that data,
+        //! before starting new xfer.
         bool      xfer_pend = false;
+
+        //! Raised if
         bsem      data_flag = {};
 
         chunk() { data_flag.init(); }
