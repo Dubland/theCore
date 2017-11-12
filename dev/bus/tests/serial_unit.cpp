@@ -217,9 +217,13 @@ TEST(serial, send_byte_basic)
     // It also covers basic send_buf test.
     uint8_t byte = 0x42;
     auto expected_ret = ecl::err::ok;
+
     mock("platform_bus")
         .expectOneCall("do_tx")
         .andReturnValue(static_cast<int>(ecl::err::ok));
+    // Ignore set_tx.
+    mock("platform_bus").ignoreOtherCalls();
+
     auto actual_ret = serial_t::send_byte(byte);
     CHECK_EQUAL(expected_ret, actual_ret);
     CHECK_EQUAL(byte, platform_mock::m_tx[0]);
@@ -236,6 +240,9 @@ TEST(serial, send_full_buffer)
     mock("platform_bus")
         .expectOneCall("do_tx")
         .andReturnValue(static_cast<int>(ecl::err::ok));
+    // Ignore set_tx.
+    mock("platform_bus").ignoreOtherCalls();
+
     auto actual_ret = serial_t::send_buf(send_buf, send_size);
     CHECK_EQUAL(expected_ret, actual_ret);
     CHECK_EQUAL(serial_t::buffer_size, send_size);
@@ -249,7 +256,7 @@ TEST(serial, send_buf_larger)
     // return err:again.
     // Next, we send rest of buffer
     // while consuming bytes with platform_mock in another thread
-    uint8_t buf[serial_t::buffer_size+32];
+    uint8_t buf[serial_t::buffer_size + 32];
     size_t buf_size = sizeof(buf);
 
     for (size_t i = 0; i < buf_size; i++) {
@@ -259,6 +266,9 @@ TEST(serial, send_buf_larger)
     mock("platform_bus")
         .expectOneCall("do_tx")
         .andReturnValue(static_cast<int>(ecl::err::ok));
+    // Ignore set_tx.
+    mock("platform_bus").ignoreOtherCalls();
+
     auto ret = serial_t::send_buf(buf, buf_size);
     CHECK_EQUAL(ecl::err::again, ret);
     CHECK_EQUAL(serial_t::buffer_size, buf_size);

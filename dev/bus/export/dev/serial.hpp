@@ -295,7 +295,7 @@ uint8_t serial<PBus, buf_size>::m_tx_buf[buf_size];
 template <class PBus, size_t buf_size>
 err serial<PBus, buf_size>::init()
 {
-    m_chunks.ini/t();
+    m_chunks.init();
     ecl_assert(!m_is_inited);
 
     auto result = PBus::init();
