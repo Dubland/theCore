@@ -153,22 +153,29 @@ private:
         //! before starting new xfer.
         bool      xfer_pend = false;
 
-        //! Raised if
+        //! Raised by xfer when empty buffer is filled with a new data.
         bsem      data_flag = {};
 
+        //! Initializes chunk
         chunk() { data_flag.init(); }
 
-        // Called by user when buffer is finally depleted.
+        //! Resters state of the chunk. Called by user when buffer is
+        //! finally depleted.
         void restore() { start = end = 0; }
-        // Called by xfer, if next buffer still read by the user.
+        //! Sets pending xfer flag. Called by xfer, if current buffer still
+        //! read by the user.
         void set_pend() { xfer_pend = true; }
-        // Called by user after moving to the next buffer.
+        //! Checks pending xfer flag. Called by user after moving to the next buffer.
+        //! Thus, user can start new xfer with current chunk.
         bool pend() { return xfer_pend; }
-        // Called by xfer to check if buffer is not used
+        //! Checks if buffer is ready to start xfer. Called by xfer before
+        //! starting new xfer. Returns true, if restore() call was made earlier
+        //! and no other changes were done.
         bool fresh() { return !start && !end; }
 
-        // Called by user or xfer, when new xfer should be started
-        // Pre: previous xfer must be completed
+        //! Starts new xfer. Called by user or xfer (depending on xfer_pend
+        //! flag, when new xfer must be started.
+        //! Pre: previous xfer must be fully completed and buffer is fresh.
         ecl::err start_xfer()
         {
             PBus::set_rx(data, size());
@@ -185,53 +192,80 @@ private:
                 return rc;
             }
 
+            // Convinient move - pending xfer satisfied.
             xfer_pend = false;
             return rc;
         }
 
-        // Called by user to check how much data is there
+        //! Checks how much data inside the buffer. Called by user.
         size_t fill() { ecl_assert(end >= start); return end - start; }
-        // Called by user and xfer, to check if there are new data to read.
+        //! Checks if there is new data to read.
+        //! Called by user and xfer.
         bool no_data() { return !fill(); }
+        //! Checks if no more data can be read _and_ written to the buffer.
+        //! Called by user.
         bool depleted() { return start == size(); }
+        //! Checks if no more data can be written to the buffer.
+        //! Callled by xfer.
         bool no_space() { return end == size(); }
-
+        //! Waits for new data inside buffer.
+        //! _Must_ be called by user and _must_ be called if no_data() returned
+        //! true before.
         bool wait_data() { data_flag.get().wait(); return true; } // TODO
+        //! Signals new data arrival. _Must_ be called by xfer when empty
+        //! buffer receives some data.
         void signal_data() { data_flag.get().signal(); }
-
+        //! Increments write data counters when new data arrives.
+        //! Called by xfer.
         void new_bytes(size_t cnt) { end += cnt; ecl_assert(end <= size()); }
 
+        //! Copies data from buffer to user, increments read counters.
+        //! Called by user.
         size_t copy(uint8_t *dst, size_t sz)
         {
-            auto to_copy = std::min(sz, fill());
-            ecl_assert(to_copy); // There must be some data.
+            // This method operates ISR-owned `end` marker.
+            // End marker is read atomically as a part of fill() call.
+            // Serial buffer opeartions designed to prevent xfer from
+            // overwriting unread user data and user markers.
 
-            //std::cout << "copy -> " << start << " -> " << to_copy << std::endl;
+            auto occupied = fill();
+
+            auto to_copy = std::min(sz, occupied);
+            ecl_assert(to_copy); // There must be some data.
 
             std::copy(data + start, data + start + to_copy, dst);
             start += to_copy;
             ecl_assert(start <= end);
             return to_copy;
         }
-
     };
 
+    //! Helper aggregate with two chunks organized together.
+    //! \details Chunk can be assigned to user, to xfer, or to both user and xfer.
+    //! When chunk is assigned to user (regardless of chunk assignment for xfer),
+    //! it means that user can read from that chunk.
+    //! When chunk is assigned to xfer, it means that xfer either ongoing
+    //! in the xfer chunk, or about to happen.
     struct serial_chunks
     {
-        chunk chunks[2] = {};
-        int user_idx = 0;
-        int xfer_idx = 0;
+        chunk chunks[2] = {};   //!< Chunks themselves
+        int user_idx = 0;       //!< Current chunk, owned by user.
+        int xfer_idx = 0;       //!< Current chunk, owned by xfer.
 
+        //! Returns buffer for user to operate on.
         chunk &user() { return chunks[user_idx]; }
+        //! Returns buffer for xfer to operate on.
         chunk &xfer() { return chunks[xfer_idx]; }
 
+        //! Returns next user buffer.
         chunk &user_next() { user_idx ^= 1; return user(); }
+        //! Returns next xfer buffer.
         chunk &xfer_next() { xfer_idx ^= 1; return xfer(); }
     };
 
-    static safe_storage<serial_chunks> m_chunks;
-    static safe_storage<binary_semaphore> m_tx_rdy; //!< Signalled if tx channel is ready
-    static uint8_t m_tx_buf[buf_size];
+    static safe_storage<serial_chunks>      m_chunks;           //! Chunks for RX.
+    static safe_storage<binary_semaphore>   m_tx_rdy;           //!< Signalled if tx channel is ready
+    static uint8_t                          m_tx_buf[buf_size]; //!< TX buffer.
 };
 
 template <class PBus, size_t buf_size>
@@ -252,7 +286,7 @@ uint8_t serial<PBus, buf_size>::m_tx_buf[buf_size];
 template <class PBus, size_t buf_size>
 err serial<PBus, buf_size>::init()
 {
-    m_chunks.init();
+    m_chunks.ini/t();
     ecl_assert(!m_is_inited);
 
     auto result = PBus::init();
@@ -290,6 +324,7 @@ void serial<PBus, buf_size>::bus_handler(bus_channel ch, bus_event type, size_t 
             // TODO: correct assert to consume more than 1 byte at time.
             ecl_assert(xfer_buf.end + 1 == total);
 
+            // Notify user if new data arrives
             if (xfer_buf.no_data()) {
                 xfer_buf.signal_data();
             }
@@ -297,10 +332,17 @@ void serial<PBus, buf_size>::bus_handler(bus_channel ch, bus_event type, size_t 
             xfer_buf.new_bytes(1);
 
             if (xfer_buf.no_space()) {
+                // If there is no place to write, we must move to the next buffer.
                 auto &new_xfer_buf = m_chunks.get().xfer_next();
+
+                // If chunk is fresh it means that all data was succesfully
+                // read by user and it is safe to start new xfer.
                 if (new_xfer_buf.fresh()) {
                     new_xfer_buf.start_xfer();
                 } else {
+                    // User operates over a chunk. New xfer must not be started.
+                    // Now, it is user responsibility to start it after all data
+                    // will be read.
                     new_xfer_buf.set_pend();
                 }
             }
