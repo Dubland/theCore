@@ -162,12 +162,15 @@ private:
         //! Resters state of the chunk. Called by user when buffer is
         //! finally depleted.
         void restore() { start = end = 0; }
+
         //! Sets pending xfer flag. Called by xfer, if current buffer still
         //! read by the user.
         void set_pend() { xfer_pend = true; }
+
         //! Checks pending xfer flag. Called by user after moving to the next buffer.
         //! Thus, user can start new xfer with current chunk.
         bool pend() { return xfer_pend; }
+
         //! Checks if buffer is ready to start xfer. Called by xfer before
         //! starting new xfer. Returns true, if restore() call was made earlier
         //! and no other changes were done.
@@ -199,22 +202,28 @@ private:
 
         //! Checks how much data inside the buffer. Called by user.
         size_t fill() { ecl_assert(end >= start); return end - start; }
+
         //! Checks if there is new data to read.
         //! Called by user and xfer.
         bool no_data() { return !fill(); }
+
         //! Checks if no more data can be read _and_ written to the buffer.
         //! Called by user.
         bool depleted() { return start == size(); }
+
         //! Checks if no more data can be written to the buffer.
         //! Callled by xfer.
         bool no_space() { return end == size(); }
+
         //! Waits for new data inside buffer.
         //! _Must_ be called by user and _must_ be called if no_data() returned
         //! true before.
         bool wait_data() { data_flag.get().wait(); return true; } // TODO
+
         //! Signals new data arrival. _Must_ be called by xfer when empty
         //! buffer receives some data.
         void signal_data() { data_flag.get().signal(); }
+
         //! Increments write data counters when new data arrives.
         //! Called by xfer.
         void new_bytes(size_t cnt) { end += cnt; ecl_assert(end <= size()); }
@@ -377,26 +386,59 @@ err serial<PBus, buf_size>::recv_buf(uint8_t *buf, size_t &sz)
 
     auto &user_buf = m_chunks.get().user();
 
-    if (m_nonblock && user_buf.no_data()) { // TODO: reading xfer-owned variable
+    // no_data() can return true, even if there is some data, due to
+    // expected race with ISR. However, it does not lead to any data corruption,
+    // only user should repeat reading again.
+    if (m_nonblock && user_buf.no_data()) {
         sz = 0;
         return err::wouldblock;
     }
 
-    while (user_buf.no_data()) { // TODO: reading xfer-owned variable
+    // It is possible that semaphore is rised, even if there is no data.
+    // For example, consider case:
+    // - xfer places 1 byte into the buffer
+    // - user does not block, reads 1 byte, 0 bytes left
+    // - xfer see 0 byte data, writes 1 more again, rises semaphore
+    // - user does not block, reads 1 byte, 0 bytes left
+    // - user tries to read 1 byte again, but there are no data
+    //   -> and semaphore is still rised <-
+    // So checking semaphore once is not enough. That's why loop is here.
+    // Also, no_data() can return true, even if there is some data, due to
+    // expected race with ISR. However, it does not lead to any data corruption.
+    // Semaphore guarantees reliability.
+    while (user_buf.no_data()) {
         user_buf.wait_data(); // All ok: semaphore
     }
 
-    // Data is there, process...
-    size_t read = user_buf.copy(buf, sz); // TODO: reading xfer-owned variable
+    // Read data. ISR running in the same time will not cause data overwrite
+    // by design of this serial class.
+    size_t read = user_buf.copy(buf, sz);
     sz = read;
 
-    // No data inside buffer.
-    if (user_buf.depleted()) { // All ok: user-owned variable
-        user_buf.restore(); // All ok: user-owned variable
+    if (user_buf.depleted()) {  // All ok: user-owned variable
+        // No data inside the buffer. As a consequence, no more place to write
+        // a new data. Next buffer should be processed.
 
+        // In this moment, ISR can occur and switch to current user buf.
+        // It will see that buffer is not fresh, and sent pending flag.
+        // This flag will force user to start new xfer below.
+
+        // Restore modifies xfer-owned variable. However, since depleted()
+        // returned 'true', that variable is no longer modified by xfer.
+        // Restore isn't atomic, thus if ISR will be called during execution
+        // of restore(), same logic will apply as described in previous comment.
+        user_buf.restore();
+
+        // ISR can occur here as well.
+        // Since restore() call is completed, buffer will be in the fresh
+        // state. xfer will be started from ISR context. Pending flag
+        // will be unset.
+
+        // New buffer will be used in the next call of recv_buf();
         m_chunks.get().user_next();
-        // Start xfer on buffer that was previously occupied by user.
-        if (user_buf.pend()) { // TODO: reading xfer-owned variable
+
+        if (user_buf.pend()) {
+            // Start pending xfer, if ISR failed to do it.
             user_buf.start_xfer();
         }
     }
