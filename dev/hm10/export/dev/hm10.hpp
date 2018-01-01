@@ -13,7 +13,7 @@
 
 #include <ecl/err.hpp>
 #include <ecl/assert.h>
-#include <ecl/serial.hpp>
+#include <dev/serial.hpp>
 #include <common/execution.hpp>
 
 #include <stdint.h>
@@ -37,11 +37,12 @@ namespace ecl
 //! Straitforward and blocking it can be used for simple demo implementations.
 //! \note Driver _is_not_ a thread safe. Using driver routine from ISR context
 //! will lead to undefined behaviour.
+//! \tparam Uart instance of the UART platform driver.
 //! \tparam Serial instance attached to the UART bus to work with.
-template<typename Uart, template<class> class Wrapper = ecl::serial>
+//!         Provided for mock injection in unit tests.
+template<class Uart, class Serial = ecl::serial<Uart>>
 class hm10_sync
 {
-    using Serial = Wrapper<Uart>;
 public:
     //! Defines internal timeout in milliseconds during which module has to
     //! respond to commands.
@@ -197,8 +198,8 @@ private:
 
 //------------------------------------------------------------------------------
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::init()
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::init()
 {
     Serial::init();
     Serial::nonblock(true);
@@ -216,8 +217,8 @@ err hm10_sync<Uart, Wrapper>::init()
     return rc;
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::set_pin(uint32_t pin)
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::set_pin(uint32_t pin)
 {
     ecl_assert(pin <= 999999);
 
@@ -237,8 +238,8 @@ err hm10_sync<Uart, Wrapper>::set_pin(uint32_t pin)
     return send_cmd_checked(pass_cmd, n, pass_cmd_resp, reps_sz);
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::get_pin(uint32_t &pin)
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::get_pin(uint32_t &pin)
 {
     constexpr char pass_cmd[] = "AT+PASS?";
     constexpr char resp_header[] = "OK+PASS:";
@@ -279,8 +280,8 @@ err hm10_sync<Uart, Wrapper>::get_pin(uint32_t &pin)
     return rc;
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::set_immediate(bool state)
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::set_immediate(bool state)
 {
     // 8 chars for 'AT+IMME:' string + 1 char state + NUL-char = 10 chars
     // Rounded for convenience.
@@ -299,8 +300,8 @@ err hm10_sync<Uart, Wrapper>::set_immediate(bool state)
     return send_cmd_checked(imme_cmd, imme_len, resp, reps_sz);
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::get_immediate(bool &state)
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::get_immediate(bool &state)
 {
     constexpr char imme_cmd[] = "AT+IMME?";
     constexpr char resp_header[] = "OK+Get:";
@@ -343,8 +344,8 @@ err hm10_sync<Uart, Wrapper>::get_immediate(bool &state)
     return rc;
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::disconnect()
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::disconnect()
 {
     constexpr char at_cmd[] = "AT";
     constexpr char resp[]   = "OK";
@@ -352,15 +353,15 @@ err hm10_sync<Uart, Wrapper>::disconnect()
     return send_cmd_checked(at_cmd, sizeof(at_cmd) - 1, resp, sizeof(resp));
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::data_send(const uint8_t *buf, size_t &sz)
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::data_send(const uint8_t *buf, size_t &sz)
 {
     size_t dummy_sz = 0;
     return xfer(buf, nullptr, sz, dummy_sz, std::chrono::milliseconds(1000));
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::data_recv(uint8_t *buf, size_t &sz, std::chrono::milliseconds ms)
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::data_recv(uint8_t *buf, size_t &sz, std::chrono::milliseconds ms)
 {
     size_t dummy_sz = 0;
     return xfer(nullptr, buf, dummy_sz, sz, ms);
@@ -368,8 +369,8 @@ err hm10_sync<Uart, Wrapper>::data_recv(uint8_t *buf, size_t &sz, std::chrono::m
 
 //------------------------------------------------------------------------------
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::send_cmd_checked(const char *cmd, size_t cmd_sz,
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::send_cmd_checked(const char *cmd, size_t cmd_sz,
                                     const char *exp_resp, size_t exp_sz,
                                     std::chrono::milliseconds ms)
 {
@@ -399,8 +400,8 @@ err hm10_sync<Uart, Wrapper>::send_cmd_checked(const char *cmd, size_t cmd_sz,
     return rc;
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::send_cmd(const char *cmd, size_t cmd_sz,
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::send_cmd(const char *cmd, size_t cmd_sz,
                                 char *resp, size_t &resp_sz,
                                 std::chrono::milliseconds ms)
 {
@@ -417,8 +418,8 @@ err hm10_sync<Uart, Wrapper>::send_cmd(const char *cmd, size_t cmd_sz,
     return rc;
 }
 
-template<typename Uart, template<class> class Wrapper>
-err hm10_sync<Uart, Wrapper>::xfer(const uint8_t *tx, uint8_t *rx, size_t &tx_sz, size_t &rx_sz,
+template<class Uart, class Serial>
+err hm10_sync<Uart, Serial>::xfer(const uint8_t *tx, uint8_t *rx, size_t &tx_sz, size_t &rx_sz,
                                 std::chrono::milliseconds ms)
 {
     err rc = err::ok;
