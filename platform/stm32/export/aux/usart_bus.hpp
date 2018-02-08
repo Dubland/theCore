@@ -655,10 +655,15 @@ void usart_bus<dev>::irq_handler()
 
     irq::clear(irqn);
 
+    // Set if error interrupt raised
+    bool error = true;
+
     // TODO: comment about flags clear sequence
 
     if (!tx_done()) {
         if (USART_GetITStatus(usart, USART_IT_TXE) == SET && m_tx) {
+            error = false;
+
             if (m_tx_left) {
                 USART_SendData(usart, m_tx[m_tx_size - m_tx_left--]);
             } else {
@@ -676,6 +681,8 @@ void usart_bus<dev>::irq_handler()
     // Otherwise (regular mode) - wait till TX is done.
     if (listen_mode() || (tx_done() && !rx_done())) {
         if (USART_GetITStatus(usart, USART_IT_RXNE) == SET && m_rx) {
+            error = false;
+
             auto data = USART_ReceiveData(usart);
 
             m_rx[m_rx_size - m_rx_left--] = static_cast<uint8_t>(data);
@@ -694,6 +701,11 @@ void usart_bus<dev>::irq_handler()
                 event_handler()(channel::rx, event::tc, m_rx_size - m_rx_left);
             }
         }
+    }
+
+    if (error) {
+        uint32_t dummy = usart->SR; dummy = usart->DR;
+        (void)dummy;
     }
 
     if (tx_done() && rx_done()) {
